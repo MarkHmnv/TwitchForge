@@ -139,7 +139,7 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
 
     @Override
     public String getBotUsername() {
-        return "DevTwitchForgeBot";
+        return "TwitchForgeBot";
     }
 
     @Override
