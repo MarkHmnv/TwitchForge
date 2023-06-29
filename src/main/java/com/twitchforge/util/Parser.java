@@ -37,7 +37,9 @@ public class Parser {
     }
 
     public static TwitchTrackerResponse getTwitchTrackerData(String url, RestTemplate restTemplate) {
-        ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, null, String.class);
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("User-Agent", "Mozilla/5.0");
+        ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
 
         if (!response.getStatusCode().is2xxSuccessful()) {
             throw new InvalidUrlException();
