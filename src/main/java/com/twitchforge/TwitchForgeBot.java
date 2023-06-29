@@ -32,17 +32,21 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
             String chatId = message.getChatId().toString();
             String text = message.getText();
 
-            if (text.equals("/start") || text.equals("/help")) {
+            if(text.equals("/start") || text.equals("/help")) {
                 start(chatId);
-            } else if(text.equals("/recover")) {
-                sendMessage(chatId, "Currently, this feature is in development and will be available soon.");
-            } else if (text.equals("/retrieve")) {
+            } else if(text.equals("/retrieve")) {
                 lastCommand = "/retrieve";
                 sendMessage(chatId, "Please provide the URL for the VOD.");
-            } else if (lastCommand.equals("/retrieve")) {
+            } else if(text.equals("/recover")) {
+                lastCommand = "/recover";
+                sendMessage(chatId, "Please provide the Twitch Tracker link for the VOD.");
+            } else if(lastCommand.equals("/retrieve")) {
                 lastCommand = "";
                 retrieveVod(chatId, text);
-            }  else {
+            }  else if(lastCommand.equals("/recover")) {
+                lastCommand = "";
+                recoverVod(chatId, text);
+            } else {
                 sendMessage(chatId, "Sorry, I didn't understand that\uD83D\uDE15 \nTry /help");
             }
         }
@@ -63,34 +67,57 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
 
     private void retrieveVod(String chatId, String text) {
         try {
-            Feeds feeds = vodRetriever.getFeeds(text);
-            StringBuilder replyText = new StringBuilder();
-
+            sendMessage(chatId, "__Trying to retrieve VOD, please wait...__");
+            Feeds feeds = vodRetriever.retrieveVod(text);
             if (feeds.getFeedsMap().isEmpty()){
                 sendMessage(chatId, "Unfortunately, I couldn't find any VOD!\uD83D\uDE22");
                 log(user, "No VOD found");
                 return;
             }
-
-            int count = 1;
-            for (Map.Entry<String, Quality> entry : feeds.getFeedsMap().entrySet()) {
-                String feed = entry.getKey();
-                Quality quality = entry.getValue();
-
-                replyText.append(count).append(". [")
-                        .append(quality.getText()).append("](")
-                        .append(feed).append(")").append("\n");
-                count++;
-            }
+            String replyText = parseFeeds(feeds);
 
             log(user, text);
 
-            SendMessage sendMessage = new SendMessage(chatId, replyText.toString());
+            SendMessage sendMessage = new SendMessage(chatId, replyText);
             sendMessage.setParseMode(ParseMode.MARKDOWN);
             execute(sendMessage);
         } catch (InvalidUrlException | BadResponseException | TelegramApiException e) {
             sendMessage(chatId, e.getMessage());
         }
+    }
+
+    private void recoverVod(String chatId, String text) {
+        try {
+            sendMessage(chatId, "__Trying to recover VOD, please wait...__");
+            Feeds feeds = vodRetriever.recoverVod(text);
+            if (feeds.getFeedsMap().isEmpty()){
+                sendMessage(chatId, "Unfortunately, I couldn't recover VOD!\uD83D\uDE22");
+                log(user, "Cannot recover VOD");
+                return;
+            }
+            String replyText = parseFeeds(feeds);
+
+            SendMessage sendMessage = new SendMessage(chatId, replyText);
+            sendMessage.setParseMode(ParseMode.MARKDOWN);
+            execute(sendMessage);
+        } catch (InvalidUrlException | BadResponseException | TelegramApiException e) {
+            sendMessage(chatId, e.getMessage());
+        }
+    }
+
+    private String parseFeeds(Feeds feeds) {
+        StringBuilder replyText = new StringBuilder();
+        int count = 1;
+        for (Map.Entry<String, Quality> entry : feeds.getFeedsMap().entrySet()) {
+            String feed = entry.getKey();
+            Quality quality = entry.getValue();
+
+            replyText.append(count).append(". [")
+                    .append(quality.getText()).append("](")
+                    .append(feed).append(")").append("\n");
+            count++;
+        }
+        return replyText.toString();
     }
 
     private void log(User user, String text) {
@@ -112,7 +139,7 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
 
     @Override
     public String getBotUsername() {
-        return "TwitchForgeBot";
+        return "DevTwitchForgeBot";
     }
 
     @Override

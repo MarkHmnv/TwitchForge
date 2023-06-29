@@ -1,98 +1,76 @@
 package com.twitchforge;
 
-import com.twitchforge.exception.BadResponseException;
 import com.twitchforge.exception.InvalidUrlException;
-import com.twitchforge.model.*;
-import com.twitchforge.model.Extensions;
-import com.twitchforge.model.request.PlaybackAccessTokenRequest;
-import com.twitchforge.model.request.Variables;
-import com.twitchforge.model.response.PlaybackAccessTokenResponse;
-import com.twitchforge.util.FileUtils;
-import org.springframework.http.*;
+import com.twitchforge.model.Feeds;
+import com.twitchforge.model.request.TokenRequest;
+import com.twitchforge.model.response.TokenResponse;
+import com.twitchforge.model.response.TwitchTrackerResponse;
+import com.twitchforge.model.response.VodResponse;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestTemplate;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.twitchforge.util.Constants.*;
-import static com.twitchforge.util.Parser.parseFeeds;
+import static com.twitchforge.util.Parser.*;
 
 public class VodRetriever {
     private final RestTemplate restTemplate;
-    private final Extensions extensions;
+    private final TokenRequest tokenRequest;
+    private TokenResponse token;
+
     public VodRetriever() {
         this.restTemplate = new RestTemplate();
-        PersistedQuery persistedQuery = PersistedQuery.builder()
-                .version(1)
-                .sha256Hash(HASH)
+        tokenRequest = TokenRequest.builder()
+                .clientId(CLIENT_ID)
+                .clientSecret(CLIENT_SECRET)
+                .grantType("client_credentials")
                 .build();
-        extensions = new Extensions(persistedQuery);
     }
-    public Feeds getFeeds(String vodUrl) {
+
+    public Feeds retrieveVod(String vodUrl) {
         String vodId = extractVodId(vodUrl).orElseThrow(InvalidUrlException::new);
-        Token token = retrieveToken(vodId);
-        String url = "https://usher.ttvnw.net/vod/" + vodId + ".m3u8?sig=" + token.getSignature() +
-                "&token=" + token.getToken() + "&allow_source=true&player=twitchweb" +
-                "&allow_spectre=true&allow_audio_only=true";
-        File downloadedFile = null;
-        try {
-            URL downloadUrl = new URL(url);
-            downloadedFile = File.createTempFile("TwitchForge-Playlist", ".m3u8");
-            downloadedFile.deleteOnExit();
-
-            HttpURLConnection connection = (HttpURLConnection) downloadUrl.openConnection();
-
-            try (InputStream in = connection.getInputStream();
-                 FileOutputStream out = new FileOutputStream(downloadedFile)) {
-                byte[] buffer = new byte[4096];
-                int bytesRead;
-                while ((bytesRead = in.read(buffer)) != -1) {
-                    out.write(buffer, 0, bytesRead);
-                }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return parseFeeds(FileUtils.read(downloadedFile.getAbsolutePath()));
-    }
-
-    private Token retrieveToken(String vodId) {
-        Variables variables = Variables.builder()
-                .isLive(false)
-                .login("")
-                .isVod(true)
-                .vodID(vodId)
-                .playerType("channel_home_live")
-                .build();
-
-        PlaybackAccessTokenRequest request = PlaybackAccessTokenRequest.builder()
-                .operationName("PlaybackAccessToken")
-                .variables(variables)
-                .extensions(extensions)
-                .build();
+        String url = "https://api.twitch.tv/helix/videos?id=" + vodId;
+        updateBearerToken();
 
         HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token.getAccessToken());
         headers.set("Client-ID", CLIENT_ID);
-        HttpEntity<PlaybackAccessTokenRequest> requestEntity = new HttpEntity<>(request, headers);
-        PlaybackAccessTokenResponse response = restTemplate
-                .exchange(TOKEN_URL, HttpMethod.POST, requestEntity, PlaybackAccessTokenResponse.class)
-                .getBody();
+        ResponseEntity<VodResponse> vodResponse = restTemplate
+                .exchange(url, HttpMethod.GET, new HttpEntity<>(headers), VodResponse.class);
 
-        if (response.getData().getVideoPlaybackAccessToken() == null){
-            throw new BadResponseException();
+        if (!vodResponse.getStatusCode().is2xxSuccessful()) {
+            throw new InvalidUrlException();
         }
+        return parseTwitchResponse(vodResponse.getBody().getData().get(0), restTemplate);
+    }
 
-        return Token.builder()
-                .signature(response.getData().getVideoPlaybackAccessToken().getSignature())
-                .token(response.getData().getVideoPlaybackAccessToken().getValue())
-                .build();
+    public Feeds recoverVod(String vodUrl) {
+        TwitchTrackerResponse response = getTwitchTrackerData(vodUrl, restTemplate);
+        return parseTwitchTrackerResponse(response, restTemplate);
+    }
+
+    private void updateBearerToken() {
+        if(token == null && isTokenExpired()){
+            HttpEntity<TokenRequest> requestEntity = new HttpEntity<>(tokenRequest);
+            token = restTemplate
+                    .exchange(TOKEN_URL, HttpMethod.POST, requestEntity, TokenResponse.class)
+                    .getBody();
+        }
+    }
+
+    private boolean isTokenExpired() {
+        if (token != null) {
+            long currentTimeInSeconds = System.currentTimeMillis() / 1000;
+            long expirationTimeInSeconds = token.getExpiresIn();
+            return expirationTimeInSeconds <= currentTimeInSeconds;
+        }
+        return true;
     }
 
     private static Optional<String> extractVodId(String url) {
