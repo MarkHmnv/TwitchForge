@@ -1,88 +1,161 @@
 package com.twitchforge.util;
 
+import com.twitchforge.exception.BadResponseException;
+import com.twitchforge.exception.InvalidUrlException;
 import com.twitchforge.model.Feeds;
 import com.twitchforge.model.enums.Quality;
+import com.twitchforge.model.response.Data;
+import com.twitchforge.model.response.TwitchTrackerResponse;
+import org.springframework.http.*;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestTemplate;
 
-import java.util.List;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.StringReader;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class Parser {
-    public static Feeds parseFeeds(List<String> response) {
-        Feeds feeds = new Feeds();
-        for (int i = 0; i < response.size(); i++) {
-            String currentLine = response.get(i);
-            String previousLine = getLine(response, i-1);
-            String previousPreviousLine = getLine(response, i - 2);
+import static com.twitchforge.model.enums.Quality.*;
+import static com.twitchforge.util.Domains.domains;
 
-            if (!currentLine.startsWith("#")) {
-                if (previousPreviousLine.contains("chunked")) {
-                    parseSourceFeed(currentLine, previousLine, previousPreviousLine, feeds);
-                } else if (previousPreviousLine.contains("audio")) {
-                    feeds.getFeedsMap().put(currentLine, Quality.AUDIO);
-                } else if (previousPreviousLine.contains("1080p60")) {
-                    parseResolutionFeed(currentLine, previousLine, previousPreviousLine, feeds);
-                } else {
-                    parseDefaultFeed(currentLine, previousPreviousLine, feeds);
+public class Parser {
+
+    public static Feeds parseTwitchResponse(Data data, RestTemplate restTemplate) {
+        String vodToken = parseVodToken(data.getThumbnailUrl());
+        String domain = getValidDomain(vodToken, restTemplate);
+        return populateFeeds(domain, vodToken, restTemplate);
+    }
+
+    public static TwitchTrackerResponse getTwitchTrackerData(String url, RestTemplate restTemplate) {
+        ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, null, String.class);
+
+        if (!response.getStatusCode().is2xxSuccessful()) {
+            throw new InvalidUrlException();
+        }
+
+        TwitchTrackerResponse twitchTrackerResponse = new TwitchTrackerResponse();
+
+        try (BufferedReader brt = new BufferedReader(new StringReader(response.getBody()))) {
+            String line;
+            for (int i = 0; i < 300; i++) {
+                line = brt.readLine();
+                if (i == 7) {
+                    int tsIndex = line.indexOf(" on ") + 4;
+                    twitchTrackerResponse.setStartTime(line.substring(tsIndex, tsIndex + 19));
                 }
             }
+            twitchTrackerResponse.setStreamerUsername(parseStreamerNickname(url));
+            twitchTrackerResponse.setStreamId(parseStreamId(url));
+        } catch (IOException e) {
+            throw new BadResponseException();
         }
-        return feeds;
+
+        return twitchTrackerResponse;
     }
 
-    private static String getLine(List<String> response, int index) {
-        return (index > 0) ? response.get(index) : "";
+    public static Feeds parseTwitchTrackerResponse(TwitchTrackerResponse response, RestTemplate restTemplate) {
+        long timestamp = getUNIX(response.getStartTime());
+        String vodToken = computeVodToken(response.getStreamerUsername(), response.getStreamId(), timestamp);
+        String domain = getValidDomain(vodToken, restTemplate);
+        return populateFeeds(domain, vodToken, restTemplate);
     }
 
-    private static void parseSourceFeed(String currentLine, String previousLine, String previousPreviousLine, Feeds feeds) {
-        feeds.getFeedsMap().put(currentLine, Quality.SOURCE);
-        double fps = 60;
-        if (previousPreviousLine.contains("Source")) {
-            String resolution = singleRegex("#EXT-X-STREAM-INF:BANDWIDTH=\\d*,CODECS=\"[a-zA-Z0-9.]*,[a-zA-Z0-9.]*\",RESOLUTION=(\\d*x\\d*),VIDEO=\"chunked\"", previousLine);
-            feeds.getFeedsMap().put(currentLine, Quality.getQualityByResolutionAndFps(resolution, fps));
+    private static String parseVodToken(String thumbnailUrl) {
+        Pattern pattern = Pattern.compile("/([a-zA-Z0-9_]+)//thumb");
+        Matcher matcher = pattern.matcher(thumbnailUrl);
+
+        if (matcher.find()) {
+            return matcher.group(1);
         } else {
-            String patternF = "#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID=\"chunked\",NAME=\"([0-9p]*) \\(source\\)\",AUTOSELECT=[\"YES\"||\"NO\"]*,DEFAULT=[\"YES\"||\"NO\"]*";
-            Pattern pF = Pattern.compile(patternF);
-            Matcher mF = pF.matcher(previousPreviousLine);
-            fps = 0;
-            if (mF.find()) {
-                String vid = mF.group(1);
-                fps = Double.parseDouble(vid.substring(vid.indexOf('p') + 1));
-            }
-            String pattern = "#EXT-X-STREAM-INF:BANDWIDTH=\\d*,RESOLUTION=(\\d*x\\d*),CODECS=\"[a-zA-Z0-9.]*,[a-zA-Z0-9.]*\",VIDEO=\"chunked\"";
-            Pattern p = Pattern.compile(pattern);
-            Matcher m = p.matcher(previousLine);
-            if (m.find()) {
-                feeds.getFeedsMap().put(currentLine, Quality.getQualityByResolutionAndFps(m.group(1), fps));
-            }
+            throw new BadResponseException();
         }
     }
 
-    private static void parseResolutionFeed(String currentLine, String previousLine, String previousPreviousLine, Feeds feeds) {
-        String patternF = "#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID=\"1080p[0-9]*\",NAME=\"(1080p[0-9]*)\",AUTOSELECT=[\"YES\"||\"NO\"]*,DEFAULT=[\"YES\"||\"NO\"]*";
-        Pattern pF = Pattern.compile(patternF);
-        Matcher mF = pF.matcher(previousPreviousLine);
-        double fps = 0;
-        if (mF.find()) {
-            String vid = mF.group(1);
-            fps = Double.parseDouble(vid.substring(vid.indexOf('p') + 1));
+    private static String getValidDomain(String vodToken, RestTemplate restTemplate) {
+        String m3u8Link = SOURCE.getM3u8Link();
+        Optional<String> validDomain = domains.parallelStream()
+                .filter(domain -> {
+                    String fullUrl = domain + vodToken + m3u8Link;
+                    try {
+                        ResponseEntity<String> response = restTemplate.getForEntity(fullUrl, String.class);
+                        return response.getStatusCode().is2xxSuccessful();
+                    } catch (HttpClientErrorException ex) {
+                        return false;
+                    }
+                })
+                .findFirst();
+
+        return validDomain.orElseThrow(BadResponseException::new);
+    }
+
+    private static Feeds populateFeeds(String domain, String vodToken, RestTemplate restTemplate) {
+        Map<String, Quality> feedsMap = new ConcurrentHashMap<>(Quality.values().length);
+        String baseUrl = domain + vodToken;
+        Arrays.stream(Quality.values()).parallel().forEach(quality -> {
+            String fullUrl = baseUrl + quality.getM3u8Link();
+            try {
+                ResponseEntity<String> response = restTemplate.getForEntity(fullUrl, String.class);
+                if (response.getStatusCode().is2xxSuccessful()) {
+                    feedsMap.put(baseUrl + quality.getM3u8Link(), quality);
+                }
+            } catch (HttpClientErrorException ignored) {}
+        });
+        return new Feeds(feedsMap);
+    }
+
+    private static long getUNIX(String timestamp) {
+        String time = timestamp + " UTC";
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss zzz");
+        LocalDateTime dateTime = LocalDateTime.parse(time, formatter);
+        return dateTime.toEpochSecond(ZoneOffset.UTC);
+    }
+
+    private static String computeVodToken(String streamerUsername, long streamId, long timestamp) {
+        String token = streamerUsername + "_" + streamId + "_" + timestamp;
+        String hash = hash(token);
+        return hash + "_" + token;
+    }
+
+    private static String hash(String token) {
+        MessageDigest md = null;
+        try {
+            md = MessageDigest.getInstance("SHA-1");
+        } catch (NoSuchAlgorithmException ignored) {}
+        byte[] result = md.digest(token.getBytes());
+        StringBuilder sb = new StringBuilder();
+        for (byte val : result) {
+            sb.append(String.format("%02x", val));
         }
-        String pattern = "#EXT-X-STREAM-INF:BANDWIDTH=\\d*,CODECS=\"[a-zA-Z0-9.]*,[a-zA-Z0-9.]*\",RESOLUTION=(\\d*x\\d*),VIDEO=\"1080p[0-9]*\"";
-        Pattern p = Pattern.compile(pattern);
-        Matcher m = p.matcher(previousLine);
-        if (m.find()) {
-            feeds.getFeedsMap().put(currentLine, Quality.getQualityByResolutionAndFps(m.group(1), fps));
+        return sb.substring(0, 20);
+    }
+
+    private static String parseStreamerNickname(String url) {
+        Pattern pattern = Pattern.compile(".+/(.+)/streams/\\d+");
+        Matcher matcher = pattern.matcher(url);
+        if (matcher.matches()) {
+            return matcher.group(1);
+        } else {
+            throw new InvalidUrlException();
         }
     }
 
-    private static void parseDefaultFeed(String currentLine, String previousPreviousLine, Feeds feeds) {
-        String video = singleRegex("#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID=\"([\\d]*p[36]0)\",NAME=\"([0-9p]*)\",AUTOSELECT=[\"YES\"||\"NO\"]*,DEFAULT=[\"YES\"||\"NO\"]*", previousPreviousLine);
-        Quality quality = Quality.getQualityByVideo(video);
-        feeds.getFeedsMap().put(currentLine, quality);
-    }
-
-    private static String singleRegex(String pattern, String value) {
-        Matcher matcher = Pattern.compile(pattern).matcher(value);
-        return matcher.find() ? matcher.group(1) : null;
+    private static long parseStreamId(String url) {
+        Pattern pattern = Pattern.compile(".+/streams/(\\d+)");
+        Matcher matcher = pattern.matcher(url);
+        if (matcher.matches()) {
+            return Long.parseLong(matcher.group(1));
+        } else {
+            throw new InvalidUrlException();
+        }
     }
 }
