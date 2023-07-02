@@ -4,6 +4,7 @@ import com.twitchforge.exception.BadResponseException;
 import com.twitchforge.exception.InvalidUrlException;
 import com.twitchforge.model.Feeds;
 import com.twitchforge.model.enums.Quality;
+import com.twitchforge.util.Command;
 import lombok.RequiredArgsConstructor;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.ParseMode;
@@ -21,31 +22,28 @@ import static com.twitchforge.util.Constants.LOG_CHAT_ID;
 @RequiredArgsConstructor
 public class TwitchForgeBot extends TelegramLongPollingBot {
     private final VodRetriever vodRetriever;
-    private String lastCommand;
+    private Command lastCommand;
     private User user;
 
     @Override
     public void onUpdateReceived(Update update) {
-        if (update.hasMessage() && update.getMessage().hasText()){
+        if (update.hasMessage() && update.getMessage().hasText()) {
             Message message = update.getMessage();
             user = message.getFrom();
             String chatId = message.getChatId().toString();
             String text = message.getText();
+            Command currentCommand = Command.fromText(text);
 
-            if(text.equals("/start") || text.equals("/help")) {
-                start(chatId);
-            } else if(text.equals("/retrieve")) {
-                lastCommand = "/retrieve";
-                sendMessage(chatId, "Please provide the URL for the VOD.");
-            } else if(text.equals("/recover")) {
-                lastCommand = "/recover";
-                sendMessage(chatId, "Please provide the Twitch Tracker link for the VOD.");
-            } else if(lastCommand.equals("/retrieve")) {
-                lastCommand = "";
-                retrieveVod(chatId, text);
-            }  else if(lastCommand.equals("/recover")) {
-                lastCommand = "";
-                recoverVod(chatId, text);
+            if (currentCommand == Command.NONE && (lastCommand == Command.RETRIEVE || lastCommand == Command.RECOVER)) {
+                processVod(chatId, text, lastCommand);
+                lastCommand = Command.NONE;
+            } else if (currentCommand != Command.NONE) {
+                lastCommand = currentCommand;
+                if (currentCommand == Command.START) {
+                    start(chatId);
+                } else {
+                    processCommand(chatId, currentCommand);
+                }
             } else {
                 sendMessage(chatId, "Sorry, I didn't understand that\uD83D\uDE15 \nTry /help");
             }
@@ -65,44 +63,42 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
         sendMessage(chatId, text);
     }
 
-    private void retrieveVod(String chatId, String text) {
+    private void processCommand(String chatId, Command command) {
+        String message = command == Command.RETRIEVE
+                ? "Please provide the URL for the VOD."
+                : "Please provide the Twitch Tracker link for the VOD.";
+        sendMessage(chatId, message);
+    }
+
+    private void processVod(String chatId, String text, Command command) {
+        String message = command == Command.RETRIEVE
+                ? "Trying to retrieve VOD, please wait..."
+                : "Trying to recover VOD, please wait...";
+        sendMessage(chatId, message);
+
         try {
-            sendMessage(chatId, "__Trying to retrieve VOD, please wait...__");
-            Feeds feeds = vodRetriever.retrieveVod(text);
-            if (feeds.getFeedsMap().isEmpty()){
-                sendMessage(chatId, "Unfortunately, I couldn't find any VOD!\uD83D\uDE22");
-                log(user, "No VOD found");
-                return;
-            }
-            String replyText = parseFeeds(feeds);
-
+            Feeds feeds = command == Command.RETRIEVE
+                    ? vodRetriever.retrieveVod(text)
+                    : vodRetriever.recoverVod(text);
             log(user, text);
-
-            SendMessage sendMessage = new SendMessage(chatId, replyText);
-            sendMessage.setParseMode(ParseMode.MARKDOWN);
-            execute(sendMessage);
+            processFeeds(chatId, feeds);
         } catch (InvalidUrlException | BadResponseException | TelegramApiException e) {
             sendMessage(chatId, e.getMessage());
         }
     }
 
-    private void recoverVod(String chatId, String text) {
-        try {
-            sendMessage(chatId, "__Trying to recover VOD, please wait...__");
-            Feeds feeds = vodRetriever.recoverVod(text);
-            if (feeds.getFeedsMap().isEmpty()){
-                sendMessage(chatId, "Unfortunately, I couldn't recover VOD!\uD83D\uDE22");
-                log(user, "Cannot recover VOD");
-                return;
-            }
-            String replyText = parseFeeds(feeds);
-
-            SendMessage sendMessage = new SendMessage(chatId, replyText);
-            sendMessage.setParseMode(ParseMode.MARKDOWN);
-            execute(sendMessage);
-        } catch (InvalidUrlException | BadResponseException | TelegramApiException e) {
-            sendMessage(chatId, e.getMessage());
+    private void processFeeds(String chatId, Feeds feeds) throws TelegramApiException {
+        if (feeds.getFeedsMap().isEmpty()){
+            sendMessage(chatId, "Unfortunately, I could not find any VOD or recover any.");
+            log(user, "No VOD found or recovered");
+            return;
         }
+
+        String replyText = parseFeeds(feeds);
+
+        SendMessage sendMessage = new SendMessage(chatId, replyText);
+        sendMessage.setParseMode(ParseMode.MARKDOWN);
+        execute(sendMessage);
     }
 
     private String parseFeeds(Feeds feeds) {
