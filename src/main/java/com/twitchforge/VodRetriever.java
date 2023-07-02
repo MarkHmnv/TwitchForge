@@ -56,7 +56,7 @@ public class VodRetriever {
     }
 
     private void updateBearerToken() {
-        if(token == null && isTokenExpired()){
+        if(isTokenExpired()){
             HttpEntity<TokenRequest> requestEntity = new HttpEntity<>(tokenRequest);
             token = restTemplate
                     .exchange(TOKEN_URL, HttpMethod.POST, requestEntity, TokenResponse.class)
