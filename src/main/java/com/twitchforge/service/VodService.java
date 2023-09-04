@@ -1,7 +1,10 @@
-package com.twitchforge;
+package com.twitchforge.service;
 
+import com.google.inject.Inject;
+import com.google.inject.Singleton;
+import com.twitchforge.config.ConfigLoader;
 import com.twitchforge.exception.InvalidUrlException;
-import com.twitchforge.model.Feeds;
+import com.twitchforge.model.enums.Quality;
 import com.twitchforge.model.request.TokenRequest;
 import com.twitchforge.model.response.TokenResponse;
 import com.twitchforge.model.response.TwitchTrackerResponse;
@@ -12,47 +15,51 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static com.twitchforge.util.Constants.*;
-import static com.twitchforge.util.Parser.*;
 
-public class VodRetriever {
+@Singleton
+public class VodService {
     private final RestTemplate restTemplate;
     private final TokenRequest tokenRequest;
+    private final ParserService parserService;
+    private final ConfigLoader config;
     private TokenResponse token;
 
-    public VodRetriever() {
-        this.restTemplate = new RestTemplate();
-        tokenRequest = TokenRequest.builder()
-                .clientId(CLIENT_ID)
-                .clientSecret(CLIENT_SECRET)
-                .grantType("client_credentials")
-                .build();
+    @Inject
+    public VodService(ParserService parserService,
+                      TokenRequest tokenRequest,
+                      RestTemplate restTemplate,
+                      ConfigLoader config) {
+        this.parserService = parserService;
+        this.tokenRequest = tokenRequest;
+        this.restTemplate = restTemplate;
+        this.config = config;
     }
 
-    public Feeds retrieveVod(String vodUrl) {
+    public Map<String, Quality> retrieveVod(String vodUrl) {
         String vodId = extractVodId(vodUrl).orElseThrow(InvalidUrlException::new);
-        String url = "https://api.twitch.tv/helix/videos?id=" + vodId;
+        String url = VOD_RETRIEVE_URL + vodId;
         updateBearerToken();
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(token.getAccessToken());
-        headers.set("Client-ID", CLIENT_ID);
+        headers.set(CLIENT_ID_HEADER, config.getString(CLIENT_ID));
         ResponseEntity<VodResponse> vodResponse = restTemplate
                 .exchange(url, HttpMethod.GET, new HttpEntity<>(headers), VodResponse.class);
 
         if (!vodResponse.getStatusCode().is2xxSuccessful()) {
             throw new InvalidUrlException();
         }
-        return parseTwitchResponse(vodResponse.getBody().getData().get(0), restTemplate);
+        return parserService.parseTwitchResponse(vodResponse.getBody().getData().get(0), restTemplate);
     }
 
-    public Feeds recoverVod(String vodUrl) {
-        TwitchTrackerResponse response = getTwitchTrackerData(vodUrl, restTemplate);
-        return parseTwitchTrackerResponse(response, restTemplate);
+    public Map<String, Quality> recoverVod(String vodUrl) {
+        TwitchTrackerResponse response = parserService.getTwitchTrackerData(vodUrl, restTemplate);
+        return parserService.parseTwitchTrackerResponse(response, restTemplate);
     }
 
     private void updateBearerToken() {
@@ -73,9 +80,9 @@ public class VodRetriever {
         return true;
     }
 
-    private static Optional<String> extractVodId(String url) {
+    private Optional<String> extractVodId(String url) {
         Optional<String> videoId = Optional.empty();
-        Matcher matcher = Pattern.compile("videos/(\\d+)").matcher(url);
+        Matcher matcher = TWITCH_VIDEO_PATTERN.matcher(url);
 
         if (matcher.find()) {
             videoId = Optional.of(matcher.group(1));
