@@ -1,45 +1,55 @@
-package com.twitchforge.util;
+package com.twitchforge.service;
 
+import com.google.inject.Inject;
+import com.google.inject.Singleton;
 import com.twitchforge.exception.BadResponseException;
 import com.twitchforge.exception.InvalidUrlException;
-import com.twitchforge.model.Feeds;
 import com.twitchforge.model.enums.Quality;
 import com.twitchforge.model.response.Data;
 import com.twitchforge.model.response.TwitchTrackerResponse;
+import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.BufferedReader;
-import java.io.IOException;
 import java.io.StringReader;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static com.twitchforge.model.enums.Quality.*;
+import static com.twitchforge.util.Constants.*;
 import static com.twitchforge.util.Domains.domains;
 
-public class Parser {
+@Slf4j
+@Singleton
+public class ParserService {
+    private final MessageDigest shaDigest;
+    private final HttpHeaders headersWithUserAgent;
 
-    public static Feeds parseTwitchResponse(Data data, RestTemplate restTemplate) {
+    @Inject
+    public ParserService(MessageDigest shaDigest, HttpHeaders headersWithUserAgent) {
+        this.shaDigest = shaDigest;
+        this.headersWithUserAgent = headersWithUserAgent;
+    }
+
+
+    public Map<String, Quality> parseTwitchResponse(Data data, RestTemplate restTemplate) {
         String vodToken = parseVodToken(data.getThumbnailUrl());
         String domain = getValidDomain(vodToken, restTemplate);
         return populateFeeds(domain, vodToken, restTemplate);
     }
 
-    public static TwitchTrackerResponse getTwitchTrackerData(String url, RestTemplate restTemplate) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("User-Agent", "Mozilla/5.0");
-        ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headers), String.class);
+    @SneakyThrows
+    public TwitchTrackerResponse getTwitchTrackerData(String url, RestTemplate restTemplate) {
+        ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(headersWithUserAgent), String.class);
 
         if (!response.getStatusCode().is2xxSuccessful()) {
             throw new InvalidUrlException();
@@ -49,7 +59,7 @@ public class Parser {
 
         try (BufferedReader brt = new BufferedReader(new StringReader(response.getBody()))) {
             String line;
-            for (int i = 0; i < 300; i++) {
+            for (int i = 0; i < 8; i++) {
                 line = brt.readLine();
                 if (i == 7) {
                     int tsIndex = line.indexOf(" on ") + 4;
@@ -58,14 +68,12 @@ public class Parser {
             }
             twitchTrackerResponse.setStreamerUsername(parseStreamerNickname(url));
             twitchTrackerResponse.setStreamId(parseStreamId(url));
-        } catch (IOException e) {
-            throw new BadResponseException();
         }
 
         return twitchTrackerResponse;
     }
 
-    public static Feeds parseTwitchTrackerResponse(TwitchTrackerResponse response, RestTemplate restTemplate) {
+    public Map<String, Quality> parseTwitchTrackerResponse(TwitchTrackerResponse response, RestTemplate restTemplate) {
         long timestamp = getUNIX(response.getStartTime());
         String vodToken = computeVodToken(response.getStreamerUsername(), response.getStreamId(), timestamp);
         String domain = getValidDomain(vodToken, restTemplate);
@@ -73,23 +81,22 @@ public class Parser {
     }
 
     private static String parseVodToken(String thumbnailUrl) {
-        Pattern pattern = Pattern.compile("/([a-zA-Z0-9_]+)//thumb");
-        Matcher matcher = pattern.matcher(thumbnailUrl);
-
-        if (matcher.find()) {
-            return matcher.group(1);
-        } else {
+        Matcher matcher = VOD_TOKEN_PATTERN.matcher(thumbnailUrl);
+        if (!matcher.find()) {
+            log.error("Error extracting vod token");
             throw new BadResponseException();
         }
+        return matcher.group(1);
     }
 
-    private static String getValidDomain(String vodToken, RestTemplate restTemplate) {
+    private String getValidDomain(String vodToken, RestTemplate restTemplate) {
         String m3u8Link = SOURCE.getM3u8Link();
         Optional<String> validDomain = domains.parallelStream()
                 .filter(domain -> {
                     String fullUrl = domain + vodToken + m3u8Link;
                     try {
-                        ResponseEntity<String> response = restTemplate.getForEntity(fullUrl, String.class);
+                        ResponseEntity<String> response = restTemplate
+                                .exchange(fullUrl, HttpMethod.GET, new HttpEntity<>(headersWithUserAgent), String.class);
                         return response.getStatusCode().is2xxSuccessful();
                     } catch (HttpClientErrorException ex) {
                         return false;
@@ -100,64 +107,58 @@ public class Parser {
         return validDomain.orElseThrow(BadResponseException::new);
     }
 
-    private static Feeds populateFeeds(String domain, String vodToken, RestTemplate restTemplate) {
+    private Map<String, Quality> populateFeeds(String domain, String vodToken, RestTemplate restTemplate) {
         Map<String, Quality> feedsMap = new ConcurrentHashMap<>(Quality.values().length);
         String baseUrl = domain + vodToken;
-        Arrays.stream(Quality.values()).parallel().forEach(quality -> {
-            String fullUrl = baseUrl + quality.getM3u8Link();
-            try {
-                ResponseEntity<String> response = restTemplate.getForEntity(fullUrl, String.class);
-                if (response.getStatusCode().is2xxSuccessful()) {
-                    feedsMap.put(baseUrl + quality.getM3u8Link(), quality);
-                }
-            } catch (HttpClientErrorException ignored) {}
-        });
-        return new Feeds(feedsMap);
+        Arrays.stream(Quality.values())
+                .parallel()
+                .forEach(quality -> populateFeed(feedsMap, baseUrl + quality.getM3u8Link(), quality, restTemplate));
+        return feedsMap;
     }
 
-    private static long getUNIX(String timestamp) {
+    private void populateFeed(Map<String, Quality> feedsMap, String url, Quality quality, RestTemplate restTemplate) {
+        try {
+            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
+            if(response.getStatusCode().is2xxSuccessful()) {
+                feedsMap.put(url, quality);
+            }
+        } catch (HttpClientErrorException ignored) {}
+    }
+
+    private long getUNIX(String timestamp) {
         String time = timestamp + " UTC";
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss zzz");
-        LocalDateTime dateTime = LocalDateTime.parse(time, formatter);
+        LocalDateTime dateTime = LocalDateTime.parse(time, FORMATTER);
         return dateTime.toEpochSecond(ZoneOffset.UTC);
     }
 
-    private static String computeVodToken(String streamerUsername, long streamId, long timestamp) {
+    private String computeVodToken(String streamerUsername, long streamId, long timestamp) {
         String token = streamerUsername + "_" + streamId + "_" + timestamp;
         String hash = hash(token);
         return hash + "_" + token;
     }
 
-    private static String hash(String token) {
-        MessageDigest md = null;
-        try {
-            md = MessageDigest.getInstance("SHA-1");
-        } catch (NoSuchAlgorithmException ignored) {}
-        byte[] result = md.digest(token.getBytes());
-        StringBuilder sb = new StringBuilder();
+    private String hash(String token) {
+        byte[] result = shaDigest.digest(token.getBytes());
+        var sb = new StringBuilder();
         for (byte val : result) {
             sb.append(String.format("%02x", val));
         }
         return sb.substring(0, 20);
     }
 
-    private static String parseStreamerNickname(String url) {
-        Pattern pattern = Pattern.compile(".+/(.+)/streams/\\d+");
-        Matcher matcher = pattern.matcher(url);
-        if (matcher.matches()) {
-            return matcher.group(1);
-        } else {
+    private String parseStreamerNickname(String url) {
+        Matcher matcher = STREAMER_NICKNAME_PATTERN.matcher(url);
+        if(!matcher.matches())
             throw new InvalidUrlException();
-        }
+
+        return matcher.group(1);
     }
 
-    private static long parseStreamId(String url) {
-        Pattern pattern = Pattern.compile(".+/streams/(\\d+)");
-        Matcher matcher = pattern.matcher(url);
-        if (matcher.matches()) {
-            return Long.parseLong(matcher.group(1));
-        } else {
+    private long parseStreamId(String url) {
+        Matcher matcher = STREAM_ID_PATTERN.matcher(url);
+        if(!matcher.matches())
             throw new InvalidUrlException();
-        }
+
+        return Long.parseLong(matcher.group(1));
     }
 }
