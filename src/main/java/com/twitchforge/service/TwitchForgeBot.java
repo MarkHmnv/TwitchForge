@@ -1,11 +1,12 @@
-package com.twitchforge;
+package com.twitchforge.service;
 
+import com.google.inject.Inject;
+import com.google.inject.Singleton;
+import com.twitchforge.config.ConfigLoader;
 import com.twitchforge.exception.BadResponseException;
 import com.twitchforge.exception.InvalidUrlException;
-import com.twitchforge.model.Feeds;
 import com.twitchforge.model.enums.Quality;
 import com.twitchforge.util.Command;
-import lombok.RequiredArgsConstructor;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.ParseMode;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -16,14 +17,20 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.util.Map;
 
-import static com.twitchforge.util.Constants.BOT_TOKEN;
-import static com.twitchforge.util.Constants.LOG_CHAT_ID;
+import static com.twitchforge.util.Constants.*;
 
-@RequiredArgsConstructor
+@Singleton
 public class TwitchForgeBot extends TelegramLongPollingBot {
-    private final VodRetriever vodRetriever;
+    private final VodService vodService;
+    private final ConfigLoader config;
     private Command lastCommand;
     private User user;
+
+    @Inject
+    public TwitchForgeBot(VodService vodService, ConfigLoader config) {
+        this.vodService = vodService;
+        this.config = config;
+    }
 
     @Override
     public void onUpdateReceived(Update update) {
@@ -34,7 +41,8 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
             String text = message.getText();
             Command currentCommand = Command.fromText(text);
 
-            if (currentCommand == Command.NONE && (lastCommand == Command.RETRIEVE || lastCommand == Command.RECOVER)) {
+            if (currentCommand == Command.NONE
+                    && (lastCommand == Command.RETRIEVE || lastCommand == Command.RECOVER)) {
                 processVod(chatId, text, lastCommand);
                 lastCommand = Command.NONE;
             } else if (currentCommand != Command.NONE) {
@@ -77,9 +85,9 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
         sendMessage(chatId, message);
 
         try {
-            Feeds feeds = command == Command.RETRIEVE
-                    ? vodRetriever.retrieveVod(text)
-                    : vodRetriever.recoverVod(text);
+            Map<String, Quality> feeds = command == Command.RETRIEVE
+                    ? vodService.retrieveVod(text)
+                    : vodService.recoverVod(text);
             log(user, text);
             processFeeds(chatId, feeds);
         } catch (InvalidUrlException | BadResponseException | TelegramApiException e) {
@@ -87,8 +95,8 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
         }
     }
 
-    private void processFeeds(String chatId, Feeds feeds) throws TelegramApiException {
-        if (feeds.getFeedsMap().isEmpty()){
+    private void processFeeds(String chatId, Map<String, Quality> feeds) throws TelegramApiException {
+        if (feeds.isEmpty()){
             sendMessage(chatId, "Unfortunately, I could not find any VOD or recover any.");
             log(user, "No VOD found or recovered");
             return;
@@ -101,10 +109,10 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
         execute(sendMessage);
     }
 
-    private String parseFeeds(Feeds feeds) {
+    private String parseFeeds(Map<String, Quality> feeds) {
         StringBuilder replyText = new StringBuilder();
         int count = 1;
-        for (Map.Entry<String, Quality> entry : feeds.getFeedsMap().entrySet()) {
+        for (Map.Entry<String, Quality> entry : feeds.entrySet()) {
             String feed = entry.getKey();
             Quality quality = entry.getValue();
 
@@ -119,7 +127,7 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
     private void log(User user, String text) {
         String logText = "Received message from @" + user.getUserName()
                 + "\nVOD: \n" + text;
-        sendMessage(LOG_CHAT_ID, logText);
+        sendMessage(config.getString(LOG_CHAT_ID), logText);
     }
 
     private void sendMessage(String chatId, String text) {
@@ -129,17 +137,16 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
             execute(sendMessage);
         } catch (TelegramApiException e) {
             log(user, "Error: " + e.getMessage());
-            e.printStackTrace();
         }
     }
 
     @Override
     public String getBotUsername() {
-        return "TwitchForgeBot";
+        return config.getString(BOT_USERNAME);
     }
 
     @Override
     public String getBotToken() {
-        return BOT_TOKEN;
+        return config.getString(BOT_TOKEN);
     }
 }

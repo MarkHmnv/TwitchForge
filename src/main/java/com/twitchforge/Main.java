@@ -1,5 +1,8 @@
 package com.twitchforge;
 
+import com.google.inject.Guice;
+import com.google.inject.Injector;
+import com.twitchforge.service.TwitchForgeBot;
 import lombok.extern.slf4j.Slf4j;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
@@ -9,15 +12,15 @@ import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 public class Main {
 
     public static void main(String[] args) {
-        VodRetriever vodRetriever = new VodRetriever();
+        Injector injector = Guice.createInjector(new TwitchForgeModule());
         try{
-            TwitchForgeBot twitchForgeBot = new TwitchForgeBot(vodRetriever);
+            TwitchForgeBot twitchForgeBot = injector.getInstance(TwitchForgeBot.class);
             TelegramBotsApi botsApi = new TelegramBotsApi(DefaultBotSession.class);
             botsApi.registerBot(twitchForgeBot);
 
             log.info("Bot started");
         } catch (TelegramApiException e) {
-            e.printStackTrace();
+            log.error(e.getMessage());
         }
     }
 }
