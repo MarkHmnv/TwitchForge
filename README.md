@@ -4,12 +4,12 @@ This bot allows you to access VODs (Video on Demand) on Twitch, even those reser
 
 ## Pre-Requisites
 
-Before you start using this bot, please install the [Native HLS Playback Extension](https://chrome.google.com/webstore/detail/native-hls-playback/emnphkkblegpebimobpbekeedfgemhof) on your Google Chrome browser.
+Before you start using this bot, please install the [Native HLS Playback Extension](https://chrome.google.com/webstore/detail/native-hls-playback/emnphkkblegpebimobpbekeedfgemhof) on your browser.
 
 ## Commands
 
-- `/start`: Start the bot.
-- `/retrieve`: Retrieve a VOD with a given URL.
+- `/start`, `/help`: Start the bot. Provides instructions to users on how to use the TwitchForge bot.
+- `/retrieve`: Retrieve a VOD with a given Twitch URL.
 - `/recover`: Recover a deleted VOD with a given URL from the Twitch Tracker.
 
 ## Methods Description
