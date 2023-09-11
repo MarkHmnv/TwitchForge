@@ -4,6 +4,7 @@ import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import com.twitchforge.exception.BadResponseException;
 import com.twitchforge.exception.InvalidUrlException;
+import com.twitchforge.exception.VodNotFoundException;
 import com.twitchforge.model.enums.Quality;
 import com.twitchforge.model.response.Data;
 import com.twitchforge.model.response.TwitchTrackerResponse;
@@ -104,7 +105,7 @@ public class ParserService {
                 })
                 .findFirst();
 
-        return validDomain.orElseThrow(BadResponseException::new);
+        return validDomain.orElseThrow(VodNotFoundException::new);
     }
 
     private Map<String, Quality> populateFeeds(String domain, String vodToken, RestTemplate restTemplate) {
