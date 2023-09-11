@@ -5,6 +5,7 @@ import com.google.inject.Singleton;
 import com.twitchforge.config.ConfigLoader;
 import com.twitchforge.exception.BadResponseException;
 import com.twitchforge.exception.InvalidUrlException;
+import com.twitchforge.exception.VodNotFoundException;
 import com.twitchforge.model.enums.Quality;
 import com.twitchforge.util.Command;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
@@ -90,7 +91,7 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
                     : vodService.recoverVod(text);
             log(user, text);
             processFeeds(chatId, feeds);
-        } catch (InvalidUrlException | BadResponseException | TelegramApiException e) {
+        } catch (InvalidUrlException | BadResponseException | VodNotFoundException | TelegramApiException e) {
             sendMessage(chatId, e.getMessage());
         }
     }
@@ -117,11 +118,20 @@ public class TwitchForgeBot extends TelegramLongPollingBot {
             Quality quality = entry.getValue();
 
             replyText.append(count).append(". [")
-                    .append(quality.getText()).append("](")
-                    .append(feed).append(")").append("\n");
+                    .append(escapeMarkdown(quality.getText())).append("](")
+                    .append(feed).append(")\n");
             count++;
         }
         return replyText.toString();
+    }
+
+    private String escapeMarkdown(String text) {
+        return text.replace("_", "\\_")
+                .replace("*", "\\*")
+                .replace("[", "\\[")
+                .replace("]", "\\]")
+                .replace("(", "\\(")
+                .replace(")", "\\)");
     }
 
     private void log(User user, String text) {
